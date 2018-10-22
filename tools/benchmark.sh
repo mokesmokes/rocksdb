@@ -44,16 +44,17 @@ if [ ! -z $DB_BENCH_NO_SYNC ]; then
   syncval="0";
 fi
 
-num_threads=${NUM_THREADS:-16}
+num_threads=${NUM_THREADS:-64}
 mb_written_per_sec=${MB_WRITE_PER_SEC:-0}
 # Only for tests that do range scans
 num_nexts_per_seek=${NUM_NEXTS_PER_SEEK:-10}
-cache_size=${CACHE_SIZE:-$((1 * G))}
+cache_size=${CACHE_SIZE:-17179869184}
 compression_max_dict_bytes=${COMPRESSION_MAX_DICT_BYTES:-0}
 compression_type=${COMPRESSION_TYPE:-snappy}
 duration=${DURATION:-0}
 
-num_keys=${NUM_KEYS:-$((1 * G))}
+num_keys=${NUM_KEYS:-8000000000}
+key_space=${KEY_SPACE:--1}
 key_size=${KEY_SIZE:-20}
 value_size=${VALUE_SIZE:-400}
 block_size=${BLOCK_SIZE:-8192}
@@ -63,6 +64,7 @@ const_params="
   --wal_dir=$WAL_DIR \
   \
   --num=$num_keys \
+  --key_space=$key_space \
   --num_levels=6 \
   --key_size=$key_size \
   --value_size=$value_size \
@@ -108,14 +110,12 @@ fi
 
 params_w="$const_params \
           $l0_config \
-          --max_background_compactions=16 \
-          --max_write_buffer_number=8 \
-          --max_background_flushes=7"
+          --max_background_jobs=32 \
+          --max_write_buffer_number=8"
 
 params_bulkload="$const_params \
-                 --max_background_compactions=16 \
+                 --max_background_jobs=32 \
                  --max_write_buffer_number=8 \
-                 --max_background_flushes=7 \
                  --level0_file_num_compaction_trigger=$((10 * M)) \
                  --level0_slowdown_writes_trigger=$((10 * M)) \
                  --level0_stop_writes_trigger=$((10 * M))"
@@ -126,14 +126,14 @@ params_bulkload="$const_params \
 # LSM. In level-based compaction, it means number of L0 files.
 #
 params_level_compact="$const_params \
-                --max_background_flushes=4 \
+                --max_background_jobs=32 \
                 --max_write_buffer_number=4 \
                 --level0_file_num_compaction_trigger=4 \
                 --level0_slowdown_writes_trigger=16 \
                 --level0_stop_writes_trigger=20"
 
 params_univ_compact="$const_params \
-                --max_background_flushes=4 \
+                --max_background_jobs=32 \
                 --max_write_buffer_number=4 \
                 --level0_file_num_compaction_trigger=8 \
                 --level0_slowdown_writes_trigger=16 \
@@ -232,7 +232,7 @@ function run_manual_compaction_worker {
        --subcompactions=$3 \
        --memtablerep=vector \
        --disable_wal=1 \
-       --max_background_compactions=$4 \
+       --max_background_jobs=$4 \
        --seed=$( date +%s ) \
        2>&1 | tee -a $fillrandom_output_file"
 
@@ -256,7 +256,7 @@ function run_manual_compaction_worker {
        --compaction_measure_io_stats=$1 \
        --compaction_style=$2 \
        --subcompactions=$3 \
-       --max_background_compactions=$4 \
+       --max_background_jobs=$4 \
        ;}
        2>&1 | tee -a $man_compact_output_log"
 
@@ -276,7 +276,7 @@ function run_univ_compaction {
 
   # Define a set of benchmarks.
   subcompactions=(1 2 4 8 16)
-  max_background_compactions=(16 16 8 4 2)
+  max_background_jobs=(16 16 8 4 2)
 
   i=0
   total=${#subcompactions[@]}
@@ -285,7 +285,7 @@ function run_univ_compaction {
   while [ "$i" -lt "$total" ]
   do
     run_manual_compaction_worker $io_stats $compaction_style ${subcompactions[$i]} \
-      ${max_background_compactions[$i]}
+      ${max_background_jobs[$i]}
     ((i++))
   done
 }
@@ -314,6 +314,7 @@ function run_fillseq {
        $params_w \
        --min_level_to_compress=0 \
        --threads=1 \
+       --allow_concurrent_memtable_write=0 \
        --memtablerep=vector \
        --disable_wal=$1 \
        --seed=$( date +%s ) \

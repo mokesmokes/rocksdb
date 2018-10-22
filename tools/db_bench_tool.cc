@@ -192,6 +192,10 @@ DEFINE_string(
 
 DEFINE_int64(num, 1000000, "Number of key/values to place in database");
 
+DEFINE_int64(key_space, -1,
+             "Number of distinct keys in DB"
+             "If negative, there will be FLAGS_num keys.");
+
 DEFINE_int64(numdistinct, 1000,
              "Number of distinct keys to use. Used in RandomWithVerify to "
              "read/write on fewer keys so that gets are more likely to find the"
@@ -1920,6 +1924,7 @@ class Benchmark {
   WriteOptions write_options_;
   Options open_options_;  // keep options around to properly destroy db later
   int64_t reads_;
+  int64_t key_space_;
   int64_t deletes_;
   double read_random_exp_range_;
   int64_t writes_;
@@ -2180,6 +2185,7 @@ class Benchmark {
         keys_per_prefix_(FLAGS_keys_per_prefix),
         entries_per_batch_(1),
         reads_(FLAGS_reads < 0 ? FLAGS_num : FLAGS_reads),
+        key_space_(FLAGS_key_space < 0 ? FLAGS_num : FLAGS_key_space),
         read_random_exp_range_(0.0),
         writes_(FLAGS_writes < 0 ? FLAGS_num : FLAGS_writes),
         readwrites_(
@@ -2373,6 +2379,7 @@ void VerifyDBFromDB(std::string& truth_db_name) {
       reads_ = (FLAGS_reads < 0 ? FLAGS_num : FLAGS_reads);
       writes_ = (FLAGS_writes < 0 ? FLAGS_num : FLAGS_writes);
       deletes_ = (FLAGS_deletes < 0 ? FLAGS_num : FLAGS_deletes);
+      key_space_ = (FLAGS_key_space < 0 ? FLAGS_num : FLAGS_key_space);
       value_size_ = FLAGS_value_size;
       key_size_ = FLAGS_key_size;
       entries_per_batch_ = FLAGS_batch_size;
@@ -3576,7 +3583,7 @@ void VerifyDBFromDB(std::string& truth_db_name) {
 
     Duration duration(test_duration, max_ops, ops_per_stage);
     for (size_t i = 0; i < num_key_gens; i++) {
-      key_gens[i].reset(new KeyGenerator(&(thread->rand), write_mode, num_,
+      key_gens[i].reset(new KeyGenerator(&(thread->rand), write_mode, key_space_,
                                          ops_per_stage));
     }
 
@@ -3636,7 +3643,7 @@ void VerifyDBFromDB(std::string& truth_db_name) {
 
       for (int64_t j = 0; j < entries_per_batch_; j++) {
         int64_t rand_num = key_gens[id]->Next();
-        GenerateKeyFromInt(rand_num, FLAGS_num, &key);
+        GenerateKeyFromInt(rand_num, key_space_, &key);
         if (use_blob_db_) {
 #ifndef ROCKSDB_LITE
           Slice val = gen.Generate(value_size_);
@@ -3664,7 +3671,7 @@ void VerifyDBFromDB(std::string& truth_db_name) {
           if (FLAGS_expand_range_tombstones) {
             for (int64_t offset = 0; offset < range_tombstone_width_;
                  ++offset) {
-              GenerateKeyFromInt(begin_num + offset, FLAGS_num,
+              GenerateKeyFromInt(begin_num + offset, key_space_,
                                  &expanded_keys[offset]);
               if (use_blob_db_) {
 #ifndef ROCKSDB_LITE
@@ -3679,8 +3686,8 @@ void VerifyDBFromDB(std::string& truth_db_name) {
               }
             }
           } else {
-            GenerateKeyFromInt(begin_num, FLAGS_num, &begin_key);
-            GenerateKeyFromInt(begin_num + range_tombstone_width_, FLAGS_num,
+            GenerateKeyFromInt(begin_num, key_space_, &begin_key);
+            GenerateKeyFromInt(begin_num + range_tombstone_width_, key_space_,
                                &end_key);
             if (use_blob_db_) {
 #ifndef ROCKSDB_LITE
@@ -4090,7 +4097,7 @@ void VerifyDBFromDB(std::string& truth_db_name) {
     DB* db = SelectDBWithCfh(thread)->db;
 
     int64_t pot = 1;
-    while (pot < FLAGS_num) {
+    while (pot < key_space_) {
       pot <<= 1;
     }
 
@@ -4098,7 +4105,7 @@ void VerifyDBFromDB(std::string& truth_db_name) {
     do {
       for (int i = 0; i < 100; ++i) {
         int64_t key_rand = thread->rand.Next() & (pot - 1);
-        GenerateKeyFromInt(key_rand, FLAGS_num, &key);
+        GenerateKeyFromInt(key_rand, key_space_, &key);
         ++read;
         auto status = db->Get(options, key, &value);
         if (status.ok()) {
@@ -4108,7 +4115,7 @@ void VerifyDBFromDB(std::string& truth_db_name) {
                   status.ToString().c_str());
           abort();
         }
-        if (key_rand >= FLAGS_num) {
+        if (key_rand >= key_space_) {
           ++nonexist;
         }
       }
@@ -4136,7 +4143,7 @@ void VerifyDBFromDB(std::string& truth_db_name) {
     uint64_t rand_int = rand->Next();
     int64_t key_rand;
     if (read_random_exp_range_ == 0) {
-      key_rand = rand_int % FLAGS_num;
+      key_rand = rand_int % key_space_;
     } else {
       const uint64_t kBigInt = static_cast<uint64_t>(1U) << 62;
       long double order = -static_cast<long double>(rand_int % kBigInt) /
@@ -4144,11 +4151,11 @@ void VerifyDBFromDB(std::string& truth_db_name) {
                           read_random_exp_range_;
       long double exp_ran = std::exp(order);
       uint64_t rand_num =
-          static_cast<int64_t>(exp_ran * static_cast<long double>(FLAGS_num));
+          static_cast<int64_t>(exp_ran * static_cast<long double>(key_space_));
       // Map to a different number to avoid locality.
       const uint64_t kBigPrime = 0x5bd1e995;
       // Overflow is like %(2^64). Will have little impact of results.
-      key_rand = static_cast<int64_t>((rand_num * kBigPrime) % FLAGS_num);
+      key_rand = static_cast<int64_t>((rand_num * kBigPrime) % key_space_);
     }
     return key_rand;
   }
@@ -4169,7 +4176,7 @@ void VerifyDBFromDB(std::string& truth_db_name) {
       // deterministically find the cfh corresponding to a particular key, as it
       // is done in DoWrite method.
       int64_t key_rand = GetRandomKey(&thread->rand);
-      GenerateKeyFromInt(key_rand, FLAGS_num, &key);
+      GenerateKeyFromInt(key_rand, key_space_, &key);
       read++;
       Status s;
       if (FLAGS_num_column_families > 1) {
@@ -4229,7 +4236,7 @@ void VerifyDBFromDB(std::string& truth_db_name) {
     while (!duration.Done(1)) {
       DB* db = SelectDB(thread);
       for (int64_t i = 0; i < entries_per_batch_; ++i) {
-        GenerateKeyFromInt(GetRandomKey(&thread->rand), FLAGS_num, &keys[i]);
+        GenerateKeyFromInt(GetRandomKey(&thread->rand), key_space_, &keys[i]);
       }
       std::vector<Status> statuses = db->MultiGet(options, keys, &values);
       assert(static_cast<int64_t>(statuses.size()) == entries_per_batch_);
@@ -4322,7 +4329,7 @@ void VerifyDBFromDB(std::string& truth_db_name) {
         iter_to_use = multi_iters[thread->rand.Next() % multi_iters.size()];
       }
 
-      GenerateKeyFromInt(thread->rand.Next() % FLAGS_num, FLAGS_num, &key);
+      GenerateKeyFromInt(thread->rand.Next() % key_space_, key_space_, &key);
       iter_to_use->Seek(key);
       read++;
       if (iter_to_use->Valid() && iter_to_use->key().compare(key) == 0) {
@@ -4394,8 +4401,8 @@ void VerifyDBFromDB(std::string& truth_db_name) {
       DB* db = SelectDB(thread);
       batch.Clear();
       for (int64_t j = 0; j < entries_per_batch_; ++j) {
-        const int64_t k = seq ? i + j : (thread->rand.Next() % FLAGS_num);
-        GenerateKeyFromInt(k, FLAGS_num, &key);
+        const int64_t k = seq ? i + j : (thread->rand.Next() % key_space_);
+        GenerateKeyFromInt(k, key_space_, &key);
         batch.Delete(key);
       }
       auto s = db->Write(write_options_, &batch);
@@ -4475,7 +4482,7 @@ void VerifyDBFromDB(std::string& truth_db_name) {
         }
       }
 
-      GenerateKeyFromInt(thread->rand.Next() % FLAGS_num, FLAGS_num, &key);
+      GenerateKeyFromInt(thread->rand.Next() % key_space_, key_space_, &key);
       Status s;
 
       if (write_merge == kWrite) {
@@ -4673,7 +4680,7 @@ void VerifyDBFromDB(std::string& truth_db_name) {
     // the number of iterations is the larger of read_ or write_
     while (!duration.Done(1)) {
       DB* db = SelectDB(thread);
-      GenerateKeyFromInt(thread->rand.Next() % FLAGS_num, FLAGS_num, &key);
+      GenerateKeyFromInt(thread->rand.Next() % key_space_, key_space_, &key);
       if (get_weight == 0 && put_weight == 0) {
         // one batch completed, reinitialize for next batch
         get_weight = FLAGS_readwritepercent;
@@ -4727,7 +4734,7 @@ void VerifyDBFromDB(std::string& truth_db_name) {
     // the number of iterations is the larger of read_ or write_
     while (!duration.Done(1)) {
       DB* db = SelectDB(thread);
-      GenerateKeyFromInt(thread->rand.Next() % FLAGS_num, FLAGS_num, &key);
+      GenerateKeyFromInt(thread->rand.Next() % key_space_, key_space_, &key);
 
       auto status = db->Get(options, key, &value);
       if (status.ok()) {
@@ -4778,7 +4785,7 @@ void VerifyDBFromDB(std::string& truth_db_name) {
     // the number of iterations is the larger of read_ or write_
     while (!duration.Done(1)) {
       DB* db = SelectDB(thread);
-      GenerateKeyFromInt(thread->rand.Next() % FLAGS_num, FLAGS_num, &key);
+      GenerateKeyFromInt(thread->rand.Next() % key_space_, key_space_, &key);
 
       auto status = db->Get(options, key, &existing_value);
       if (status.ok()) {
@@ -4828,7 +4835,7 @@ void VerifyDBFromDB(std::string& truth_db_name) {
     Duration duration(FLAGS_duration, readwrites_);
     while (!duration.Done(1)) {
       DB* db = SelectDB(thread);
-      GenerateKeyFromInt(thread->rand.Next() % FLAGS_num, FLAGS_num, &key);
+      GenerateKeyFromInt(thread->rand.Next() % key_space_, key_space_, &key);
 
       auto status = db->Get(options, key, &value);
       if (status.ok()) {
